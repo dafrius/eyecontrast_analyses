@@ -1,0 +1,755 @@
+
+
+#### r setup ####
+```{r setup}
+
+library(tidyverse)
+library(readr)
+library(ggplot2)
+library(brms)
+library(rstan)
+library(bayestestR)
+library(knitr)
+
+path <- "D:/shared/experiments/eyecontrast_project/eyecontrast_analyses/"
+setwd(path)
+
+load(paste(path,"/scripts/ec_pilot.rda",sep=""))
+load(paste(path,"/scripts/fit_ec_pilot.rda", sep=""))
+load(paste(path,"/scripts/preds_fit_ec_pilot.rda", sep=""))
+```
+
+
+#### Subject Info ####
+```{r obtaining subject info}
+subinfo <- c()
+
+subpath <- paste(path,"low/", sep="")
+
+a=list.files(path = subpath, pattern = "csv", all.files = TRUE,
+             full.names = FALSE, recursive = TRUE,
+             ignore.case = FALSE, include.dirs = FALSE, no.. = TRUE)
+for(i in a){
+  currsubj <- read.csv(paste(subpath,i,sep=""),stringsAsFactors = FALSE)
+  
+  currsubj2 <- currsubj %>% select(participant, age, gender)
+  
+  subinfo <- rbind(subinfo, currsubj2[1,])
+}
+
+subinfo2 <- read.csv(paste(path,"scripts/participants_info.csv", sep=""))
+
+subinfo3 <- cbind(subinfo, subinfo2$dec..VA, subinfo2$logMAR, subinfo2$Handiness, subinfo2$Fac_recog)
+
+subinfo4 <- subinfo3 %>% rename(dec_VA=4, logMAR=5, EHI=6, Benton=7)
+
+subinfo_avg_sd <- subinfo4 %>% summarise(age_avg=mean(age), age_sd=sd(age), 
+                                         VA_avg=mean(dec_VA), VA_sd=sd(dec_VA),
+                                         logMAR_avg=mean(logMAR), logMAR_sd=sd(logMAR),
+                                         right_handed=sum(EHI > 0), left_handed=sum(EHI < 0),
+                                         Benton_avg=mean(Benton), Benton_sd=sd(Benton),
+                                         n_female=sum(gender == "female"), n_male=sum(gender=="male"))
+kable(subinfo_avg_sd)
+
+```
+
+
+#### Local Input Strength Dependence ####
+```{r lisd}
+
+
+df <- lohi_ec_pilot
+
+df_trns <- df %>% mutate(contrast2= log10(contrast)) %>%
+  group_by(task) %>%
+  mutate(contrast3=(contrast2-mean(contrast2))/sd(contrast2),
+         task=as.factor(task))
+
+
+simple_d_lohi <- df_trns %>% group_by(subject, task, congruency, contrast3) %>%
+  summarise(n=n(), mean=mean(acc))
+
+d_binned <- simple_d_lohi %>% ungroup() %>% group_by(task) %>% filter(task != "low") %>%
+  # I bin everything to 4 levels
+  mutate(contbin = ntile(contrast3, n=4)) %>% group_by(task, congruency, contbin) %>% 
+  summarise(meancontrast3= mean(contrast3), tot_n=sum(n), mean_mean=mean(mean), sd_acc=sd(mean), sd_cont=sd(contrast3)) %>%
+  rename(contrast=meancontrast3, n=tot_n, mean=mean_mean) %>%
+  mutate(task= case_when(task=="up" ~ "Upright Face",
+                         task=="inv" ~ "Inverted Face"),
+         congruency = case_when( congruency == "cong" ~ "Congruent",
+                                 congruency == "inc" ~ "Incongruent",
+                                 congruency == "iso" ~ "Isolated"),
+         se_acc=sd_acc/sqrt(n),
+         se_cont=sd_cont/sqrt(n)
+         )
+
+d_binned$task <- ordered(d_binned$task, levels = c("Upright Face", "Inverted Face"))
+d_binned$congruency <- ordered(d_binned$congruency, levels = c("Incongruent", "Congruent","Isolated"))
+
+d_binned %>% ggplot(aes(x=contrast, y=mean, color=congruency))+
+  geom_point(aes(size=2.5))+
+  geom_line(aes(group=congruency))+
+  geom_errorbar(aes(ymin=mean-se_acc, ymax=mean+se_acc))+
+  geom_linerange(aes(xmin=contrast-se_cont, xmax=contrast+se_cont))+
+  ggthemes::scale_fill_colorblind() + 
+  ggthemes::scale_color_colorblind() +
+  facet_wrap(~task)+
+  theme_classic()+
+  theme(axis.title = element_text(size=25),
+    axis.text.x = element_text(size=20),
+          axis.text.y = element_text(size=20),
+          strip.text = element_text(size=20, face="bold"),
+          legend.title=element_blank(),
+          legend.text=element_text(size=20, face="bold"))+
+  xlab("Contrast")+
+  ylab("Accuracy")
+
+d_distances <- d_binned %>% select(task, congruency, contbin, contrast, mean) %>% pivot_wider(names_from=c(congruency), values_from=c(contrast, mean)) %>%
+  mutate(dist= sqrt((contrast_Congruent - contrast_Incongruent)^2 + (mean_Congruent - mean_Incongruent)^2)) 
+  
+
+d_distances %>% ggplot(aes(x=contbin, y=dist, color=task))+
+  geom_point(size=6)+
+  geom_line()+
+  scale_colour_manual(values=c("black","grey"))+
+  theme_classic()+
+  theme(axis.title = element_text(size=25),
+        axis.text.x = element_text(size=20),
+        axis.text.y = element_text(size=20),
+        legend.text=element_text(size=20, face="bold"),
+        legend.title = element_blank())+
+  xlab("Contrast Bin")+
+  ylab("Euclidean Distance")
+
+```
+
+
+#### Model information ####
+
+```{r model diagnostics, eval=FALSE}
+
+# model diagnostics # all looks good
+tail(sort(rstan::summary(fit_ec_pilot$fit)$summary[,"Rhat"]))
+head(sort(rstan::summary(fit_ec_pilot$fit)$summary[,"n_eff"]))
+pars <- variables(fit_ec_pilot)
+pars_sel <- c(sample(pars[1:10], 3), sample(pars[-(1:10)], 3))
+plot(fit_ec_pilot, variable = pars_sel, N = 6, 
+     ask = FALSE, exact_match = TRUE, newpage = TRUE, plot = TRUE)
+
+```
+
+```{r deviance checks}
+
+
+# Preparing the data
+
+df <- ec_pilot
+
+df_trns <- df %>% mutate(contrast2= log10(contrast)) %>%
+  group_by(task) %>%
+  mutate(contrast3=(contrast2-mean(contrast2))/sd(contrast2),
+         task=as.factor(task))
+
+
+simple_d_lohi <- df_trns %>% group_by(subject, task, congruency, contrast3) %>%
+  summarise(n=n(), mean=mean(acc))
+
+d_binned <- simple_d_lohi %>% ungroup() %>% group_by(congruency, task, subject) %>%
+  # I bin everything to 5 levels so that the comparison across the data and the model is simpler
+  mutate(contbin = ntile(contrast3, n=5)) %>% group_by(subject, task, congruency, contbin) %>% 
+  summarise(meancontrast3= mean(contrast3), tot_n=sum(n), mean_mean=mean(mean)) %>%
+  rename(contrast3=meancontrast3, n=tot_n, mean=mean_mean) 
+
+# Formula Calculating Deviance 
+calc_dev <- function(sim_data,pred_data,n){
+  x <- (n*sim_data*log(sim_data/pred_data))
+  y <- (n*(1-sim_data)*log((1-sim_data)/(1-pred_data)))
+  x <- x * is.finite(x)
+  y <- y * is.finite(y)
+  
+  out <- 2 * sum(x,y, na.rm=T)
+  return(out)
+}
+
+# pred prop correct of sim
+
+cis_99 <- tibble()
+
+for(i in unique(df_trns$subject)){
+  for(j in unique(df_trns$task)){
+      for(t in unique(df_trns$congruency)){
+        try <- df_trns %>% 
+                  filter(subject==i, task==j, congruency==t) %>% 
+                  group_by(contrast3) %>%
+                  summarise(mean=mean(acc), n=n()) 
+      
+        pred_df <- expand.grid(contrast3 = unique(try$contrast3),
+                               subject = i,
+                               task = j,
+                               congruency = t,
+                               guess = 1)
+        try_preds <- bind_cols(pred_df, as_tibble(fitted(fit_ec_15_congruency, newdata = pred_df, re_formula = NULL,scale="linear")))
+      
+      
+        dev_obs <- calc_dev(try$mean, try_preds$Estimate, try$n) # empirical deviance 
+        # create simulation data frame 
+        niter=1000
+        low_dev_sim <- expand.grid(iv = try$contrast3, iter = 1:niter)
+        
+        # create true probabilities based on the estimated coefficients alpha and beta 
+        low_dev_sim <- dplyr::mutate(low_dev_sim, 
+                                     true_prob = rep(try_preds$Estimate,niter),
+                                     n_trials=rep(try$n,niter))
+        
+        # from this simulate new data for a particular number of trials 
+        low_dev_sim <- dplyr::mutate(low_dev_sim, 
+                                     sim_data = mapply(function(x,n_trials) rbinom(1, n_trials, x) / n_trials, low_dev_sim$true_prob, low_dev_sim$n_trials))
+        
+        # perform deviance simulation; this returns a single deviance value for each iteration
+        # we look at 95% CI
+        low_dev_sim_summary <- low_dev_sim %>% group_by(iter) %>% summarise(dev=calc_dev(sim_data, true_prob, n_trials)) %>% summarise(quant=quantile(dev, probs=c(0.001, 0.99)))
+        
+        #low_dev_sim_summary <- low_dev_sim %>% group_by(iter) %>% summarise(dev=calc_dev(sim_data, true_prob, n_trials))
+        #cum_prob <- length(which(low_dev_sim_summary$dev < dev_obs)) / length(low_dev_sim_summary$dev)
+        
+        if(dev_obs > low_dev_sim_summary[1,] & dev_obs < low_dev_sim_summary[2,]){
+          print(1)
+          ci = 1
+        } else {
+            print(0)
+          ci = 0
+        }
+        new_row <- tibble(subject=i, task=j, cond=t, ci=ci)
+        cis_99 <- bind_rows(cis_99, new_row )
+    }
+  }
+}
+
+save(cis_99, file="conf_int_dev_99.rda")
+
+# Percentage that have empirical dev within the 95% confidence interval.
+
+
+n_devs <- cis %>% group_by(ci) %>% tally()
+percentage <- n_devs$n[2]/nrow(cis)
+sub_devs <- cis %>% group_by(subject) %>% summarise(n_ci=sum(ci))
+task_devs <- cis %>% group_by(task) %>% summarise(n_ci=sum(ci))
+task_cont_devs <- cis %>% group_by(task,cond) %>% summarise(n_ci=sum(ci))
+
+cis_spread <- cis_99 %>% pivot_wider(names_from=c("cond","task"), values_from="ci") %>%
+  mutate(sum = rowSums(across(where(is.numeric))),
+         full= case_when(sum==9 ~ 1,
+                         TRUE ~ 0),
+         with_cong_low = case_when(sum==8 & cong_low==0 ~ 1,
+                                   sum==9 ~ 1,
+                                   TRUE ~ 0))
+
+
+
+# An example with histogram
+low_dev_sim_summary <- low_dev_sim %>% group_by(iter) %>% summarise(dev=calc_dev(sim_data, true_prob, n_trials))
+
+hist(low_dev_sim_summary$dev, breaks= 30, col="blue", xlab ="Deviance", main = paste("D = ", round(dev_obs, 3), "; cpe =", round(cum_prob, 3)))
+abline(v=dev_obs, col="red", lwd=2)
+
+
+
+# Here we can see the data from one subject, how the dots are aligned in comparison to
+# the psychometric curve.
+i="ERVE2206"
+try <- df_trns %>% filter(subject==i, task==j, congruency==t) %>% group_by(contrast3) %>%
+  summarise(mean=mean(acc), n=n()) 
+
+pred_df <- expand.grid(contrast3 = seq(-2.5,2.5,l=750),
+                       subject = i,
+                       task = j,
+                       congruency = t,
+                       guess=1)
+
+try_preds <- bind_cols(pred_df, as_tibble(fitted(fit_ec_15_congruency, newdata = pred_df, re_formula = NULL,scale="linear")))
+
+
+try_preds$contrast3 <- round(try_preds$contrast3,2)
+d_binned <- try %>% mutate(contbin = ntile(contrast3, n=5)) %>% group_by(contbin) %>% 
+    summarise(meancontrast3= mean(contrast3), tot_n=sum(n), mean_mean=mean(mean)) %>%
+    rename(contrast3=meancontrast3, n=tot_n, mean=mean_mean) 
+
+indices <- match(round(d_binned$contrast3,2), try_preds$contrast3)
+
+
+plot(d_binned$contrast3, d_binned$mean, xlim=c(-3,3), ylim=c(0,1), xlab = "Dissimilarity", ylab = "Proportion correct",
+     pch = 19, cex=1.5, col="blue")
+lines(try_preds$contrast3, try_preds$Estimate, lwd=2, col="red")
+segments(x0=d_binned$contrast3, y0=d_binned$mean, x1=d_binned$contrast3, y1=try_preds$Estimate[indices], col="red")
+par(cex.axis=1.5, cex.lab=1.5)
+
+```
+
+
+#### Thresholds ####
+
+```{r calculating thresholds from intercept and slopes, eval=FALSE}
+sumcoefs <- coef(fit_ec_pilot)$subject
+
+sumco1 <- as_tibble(sumcoefs, rownames="subject") # Wrangling the data
+
+# Same thing, for congruency
+sumco2 <- sumco1 %>% select(subject, starts_with("Esti")) %>% # Only getting the "Estimate" values
+  pivot_longer(2:19, names_to="name", values_to="val") %>% #long format
+  mutate(name = stringr::str_remove(name,"Estimate.eta_")) %>% # removing the recurring and unnecessary part in the name
+  pivot_wider(names_from="name", values_from="val") %>% # wide format again
+  mutate(int_inv_cong = Intercept,
+         slp_inv_cong = contrast3,
+         int_low_cong = Intercept + tasklow,
+         slp_low_cong = contrast3 + `contrast3:tasklow`,
+         int_up_cong = Intercept + taskup,
+         slp_up_cong = contrast3 + `contrast3:taskup`,
+         int_inv_inc = Intercept + congruencyinc,
+         slp_inv_inc = contrast3 + `contrast3:congruencyinc`,
+         int_low_inc = Intercept + `tasklow` + `congruencyinc` + `tasklow:congruencyinc`,
+         slp_low_inc = contrast3 + `contrast3:tasklow` + `contrast3:congruencyinc` + `contrast3:tasklow:congruencyinc`,
+         int_up_inc = Intercept + `taskup` + `congruencyinc` + `taskup:congruencyinc`,
+         slp_up_inc = contrast3 + `contrast3:taskup` + `contrast3:congruencyinc` + `contrast3:taskup:congruencyinc`,
+         int_inv_iso = Intercept + congruencyiso,
+         slp_inv_iso = contrast3 + `contrast3:congruencyiso`,
+         int_low_iso = Intercept + tasklow + congruencyiso + `tasklow:congruencyiso`,
+         slp_low_iso = contrast3 + `contrast3:tasklow` + `contrast3:congruencyiso` + `contrast3:tasklow:congruencyiso`,
+         int_up_iso = Intercept + `taskup` + `congruencyiso` + `taskup:congruencyiso`,
+         slp_up_iso = contrast3 + `contrast3:taskup` + `contrast3:congruencyiso` + `contrast3:taskup:congruencyiso`) %>% #calculating the actual slope and intercept values
+  select(subject, starts_with("int_"), starts_with("slp")) %>%
+  pivot_longer(2:19, names_to="param", values_to="val") %>%
+  separate(param, into=c("param","task","congruency"), sep="_") %>%
+  pivot_wider(names_from="param", values_from="val") %>%
+  mutate(location=-int/slp,
+         scale=1/slp) %>%
+  rename(intercept=int,
+         slope=slp)
+
+
+
+
+
+
+etas <- sumco2 %>% mutate(task=case_when(task=="inv"~"Inverted Face",
+                                          task=="up"~"Upright Face",
+                                          task=="low"~"Contrast Detection"),
+                           congruency = case_when(congruency=="iso"~"Isolated",
+                                               congruency=="cong"~"Congruent",
+                                               congruency=="inc"~"Incongruent"))
+save(etas, file="ec_pilot_etas.rda")
+
+
+```
+
+```{r psychfits subject level, eval=FALSE}
+
+load(paste(path,"/scripts/ec_pilot_etas.rda",sep=""))
+load(paste(path,"/scripts/preds_fit_ec_pilot.rda", sep=""))
+etaslow <- etas %>% filter(task=="Contrast Detection")
+etasup <- etas %>% filter(task=="Upright Face")
+etasinv <- etas %>% filter(task=="Inverted Face")
+
+
+etaslow %>% group_by(congruency) %>% summarise(locs=mean(intercept))
+
+etaslow %>% ggplot(aes(x=congruency, y=location))+
+  geom_boxplot()
+
+#plotting all subjects curves
+
+#thresholds <- etas3 %>% select(subject, task, congruency, location) %>% rename(threshold=location)
+
+
+
+for(i in unique(pred_df$subject)){
+  #load(paste(path,"/modeling/model_data/preds_fit_ec_15_congruency.rda", sep=""))
+  filter_subject=i #RASE1806 #XALA2802 #ERVE2206 #PHSO2210
+
+  etas_single <- etas %>% filter(subject==filter_subject)
+
+  df <- lohi_ec_pilot
+
+  df_trns <- df %>% mutate(contrast2= log10(contrast)) %>%
+    group_by(task) %>%
+    mutate(contrast3=(contrast2-mean(contrast2))/sd(contrast2),
+           task=as.factor(task))
+  
+  d_av<- df_trns %>% group_by(contrast3, congruency, task, subject) %>% 
+    summarise(mean_p = mean(acc))
+
+  d_count <- df_trns %>% group_by(contrast3, congruency, task, subject) %>% 
+    summarise(n=n(), mean=mean(acc))
+
+  tasks3n <- d_count %>% filter(subject==filter_subject)
+
+  tasks3n2 <- tasks3n  %>% ungroup() %>% group_by(congruency,task) %>%
+    mutate(contrastbin = ntile(contrast3, n=5)) %>% group_by(congruency, task, contrastbin) %>% 
+    summarize(meancont= mean(contrast3), tot_n=sum(n), mean_mean=mean(mean)) %>% 
+    rename(contrast3=meancont, n=tot_n, mean=mean_mean) %>% 
+    mutate(subject=filter_subject) %>% 
+    select(contrast3, congruency, task, subject, n, mean)
+  
+  tasks3av<- d_av %>% filter(subject==filter_subject)
+  tasks3ls <- etas %>% filter(subject==filter_subject)
+  pred_df2 <- pred_df %>% mutate(hline = .75) %>% filter(subject==filter_subject)
+
+
+  pred_df2 <- pred_df2 %>% mutate(task = case_when(task=="low"~"Grating",
+                                               task=="up"~"Upright Face",
+                                               task=="inv"~"Inverted Face"),
+                              congruency = case_when(congruency=="iso"~"Isolated",
+                                                  congruency=="cong"~"Congruent",
+                                                  congruency=="inc"~"Incongruent"))
+  tasks3n2 <- tasks3n2 %>% mutate(task = case_when(task=="low"~"Grating",
+                                               task=="up"~"Upright Face",
+                                               task=="inv"~"Inverted Face"),
+                              congruency = case_when(congruency=="iso"~"Isolated",
+                                                  congruency=="cong"~"Congruent",
+                                                  congruency=="inc"~"Incongruent"))
+  tasks3ls <- tasks3ls %>% mutate(task = case_when(task=="Contrast Detection"~"Grating",
+                                                   TRUE~task))
+
+
+  pred_df2$task <- ordered(pred_df2$task, levels = c("Upright Face", "Inverted Face","Grating"))
+  pred_df2$congruency <- ordered(pred_df2$congruency, levels = c("Incongruent", "Congruent","Isolated"))
+  tasks3ls$task <- ordered(tasks3ls$task, levels = c("Upright Face", "Inverted Face","Grating"))
+  tasks3n2$task <- ordered(tasks3n2$task, levels = c("Upright Face", "Inverted Face","Grating"))
+  
+
+fig <- pred_df2 %>% ggplot(aes(x = contrast3, y = Estimate, color=congruency)) + 
+    geom_line() + 
+    geom_ribbon(aes(ymin = Q2.5, ymax = Q97.5, fill=congruency), alpha = .4, color="NA") + 
+    geom_count(data = tasks3n2, aes(x = contrast3, y = mean,size=n), show.legend=FALSE, alpha=.8) + 
+    scale_size_area(max_size=5)+
+    ggthemes::scale_fill_colorblind() + 
+    ggthemes::scale_color_colorblind() +
+    #geom_hline(yintercept=.5)+
+    geom_hline(aes(yintercept=hline))+
+    geom_vline(data=tasks3ls, aes(xintercept=location, color=congruency))+
+    #geom_segment(data=tasks3ls, aes(x=location, y=0, xend=location, yend=.75))+
+
+    #geom_vline(data=tasks3ls, aes(xintercept=location+slope/2, color=cond), linetype="dashed")+
+    #geom_vline(data=tasks3ls, aes(xintercept=location-slope/2, color=cond), linetype="dashed")+
+    facet_wrap(~task)+
+    ggtitle(filter_subject)+
+    theme_classic()+
+    xlab("Contrast (z)")+
+    ylab(expression(atop(bold("Accuracy"))))+
+    ylim(0,1)+
+    #ylab("Dependent Variable \n (Proportion 'Different' or Accuracy)")+
+    theme(axis.text.x = element_text(size=13),
+          axis.text.y = element_text(size=13),
+          strip.text = element_text(size=20, face="bold"),
+          legend.title=element_blank(),
+          legend.text=element_text(size=20, face="bold"))+
+    xlim(-3,3)+
+    theme(axis.title.x=element_text(size=20, face="bold"), axis.title=element_text(size=16, face="bold"))
+  fname=paste(filter_subject,"pmf.png",sep="")
+  ggsave(fname,plot=fig, width = 6558, height = 1800, units="px", dpi=600, limitsize=FALSE)
+}
+
+```
+
+```{r figures for plotting thresholds}
+load(paste(path,"/scripts/ec_pilot_etas.rda",sep=""))
+#  subject=="XALA2802")
+
+b1 <- etas %>% select(location, subject, task, congruency) %>%
+  pivot_wider(names_from="congruency", values_from="location") %>%
+  pivot_longer(3:5, names_to="congruency", values_to="val") %>%
+  pivot_wider(names_from=c("task","congruency"), values_from="val")
+
+b2 <- b1 %>% pivot_longer(2:10, names_to="name",values_to="val")
+b3 <- b2 %>% separate(name, into=c("task","congruency"), sep="_") %>%
+  mutate(jit1 = case_when(congruency=="Congruent"~2,
+                          congruency=="Isolated"~3,
+                          congruency=="Incongruent"~1),
+         jit2 = jitter(jit1, factor=1.8))
+
+
+threshmean <- b3 %>% filter(val < 30, val >-10) %>% group_by(task, congruency) %>%
+  summarise(val=mean(val))
+
+threshmean$task <- ordered(threshmean$task, levels = c("Upright Face", "Inverted Face","Contrast Detection"))
+threshmean$congruency <- ordered(threshmean$congruency, levels = c("Incongruent", "Congruent","Isolated"))
+threshmean <- arrange(threshmean, congruency)
+
+b3$task <- ordered(b3$task, levels = c("Upright Face", "Inverted Face","Contrast Detection"))
+b3$congruency <- ordered(b3$congruency, levels = c("Incongruent", "Congruent","Isolated"))
+
+
+b3 %>% filter(val <= 20, val >-10) %>% ggplot(aes(x=jit2, y=val, color=congruency))+
+  geom_boxplot(aes(x=congruency,fill=congruency), alpha=.5, outlier.shape=NA, notchwidth=0)+
+  geom_point(aes(group=subject),size=2.5)+
+  geom_line(aes(group=subject), color="gray", alpha=.5)+
+  facet_wrap(~task)+
+  stat_boxplot(aes(x=congruency,group=congruency),geom="errorbar", width=.1)+
+  theme_classic()+
+  ggthemes::scale_fill_colorblind() + 
+  ggthemes::scale_color_colorblind() +
+  ylab("Threshold")+
+  xlab("congruency")+
+  geom_point(data=threshmean, aes(x=congruency, y=val), color="black", alpha=.6, size=5)+
+  theme(strip.text=element_text(size=25),
+        axis.text.x=element_text(size=0),
+        axis.text.y=element_text(size=28),
+        axis.title.y=element_text(size=40),
+        axis.title.x=element_text(size=0),
+        legend.text=element_text(size=40))+
+  #legend.position="none")+
+  geom_path(data=threshmean, aes(x=congruency, y=val, group=task), color="black", alpha=.6,linewidth=1.5)
+
+```
+
+#### brms anova ####
+```{r brms anova}
+
+load(paste(path,"/modeling/model_data/ec_pilot3_etas.rda",sep=""))
+
+brmseta3 <- etas3 %>% 
+  mutate(task = as.factor(task),
+         congruency = as.factor(congruency))
+
+fit_thr_anova_ec <- brm(
+  bf(location ~ 0 + task*congruency + (0 + task*congruency||subject)),
+  data=brmseta3,
+  prior=c(prior(normal(0, 1), class = b),
+          prior(cauchy(0, 10), class = sd),
+          prior(cauchy(0, 10), class = sigma)),
+  cores=12,
+  warmup = 2000, # 2000 first iterations will be set aside.
+  iter   = 4000,
+  chains = 4,
+  file="fit_thr_anova_ec")
+save(fit_thr_anova_ec, file="fit_thr_anova_ec.rda", compress="xz")
+
+
+load(paste(path,"/modeling/model_data/fit_thr_anova_ec.rda",sep=""))
+
+fe <- as_tibble(fixef(fit_thr_anova_ec, summary=F)) %>% 
+  mutate(iter = 1:nrow(.)) %>% 
+  rename(low_cong = `taskContrastDetection`,
+         low_inc = `congruencyIncongruent`,
+         low_iso = `congruencyIsolated`,
+         inv_cong = `taskInvertedFace:congruencyIncongruent`,
+         up_cong = `taskUprightFace:congruencyIncongruent`,
+         inv_iso = `taskInvertedFace:congruencyIsolated`,
+         up_iso = `taskUprightFace:congruencyIsolated`,
+         up_inc = `taskUprightFace`,
+         inv_inc = `taskInvertedFace`) %>%
+  pivot_longer(cols = 1:9, names_to = "param", values_to = "est") %>% 
+  separate(param, into = c("task", "cond"), sep = "_") 
+
+cond_eff <- fe %>% pivot_wider(names_from = "cond", values_from = "est") %>%
+  mutate(inc_iso = inc - iso, 
+         inc_cong = inc - cong,
+         cong_iso = cong - iso)
+
+cond_eff2 <- cond_eff %>% select(iter, task, inc_iso, inc_cong, cong_iso) %>% 
+  pivot_longer(cols = inc_iso:cong_iso, names_to = "difference", values_to = "value") %>% 
+  group_by(task,  difference) %>% 
+  mutate(sig = (quantile(value, .025) < 0 & quantile(value, .975) < 0) | 
+           (quantile(value, .025) > 0 & quantile(value, .975) > 0))
+
+cond_eff2 %>% ggplot(aes(x = value, color = difference, fill = difference)) + 
+  geom_density() + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  facet_wrap(~ task) + 
+  ggthemes::scale_color_colorblind() + ggthemes::scale_fill_colorblind() +  
+  ggtitle("posterior differences between all contexts", 
+          subtitle = "different tasks")
+
+
+post <- as_draws(fit_thr_anova_ec, pars = "^b_*")
+
+up_ds <- as.data.frame(cond_eff %>% filter(task=="up") %>% select(inc_cong, cong_iso, inc_iso))
+inv_ds <- cond_eff %>% filter(task=="inv") %>% select(inc_cong, cong_iso, inc_iso)
+low_ds <- cond_eff %>% filter(task=="low") %>% select(inc_cong, cong_iso, inc_iso)
+
+
+beta_up_ds <- median(up_ds$inc_cong)
+credint_up_ds <- ci(up_ds, method="hdi")
+
+beta_inv_ds <- median(inv_ds$inc_cong)
+credint_inv_ds <- ci(inv_ds, method="hdi")
+
+beta_low_ds <- median(low_ds$inc_cong)
+credint_low_ds <- ci(low_ds, method="hdi")
+
+
+beta_up_si <- median(up_ds$cong_iso)
+credint_up_si <- ci(up_ds$cong_iso, method="hdi")
+
+beta_inv_si <- median(inv_ds$cong_iso)
+credint_inv_si <- ci(inv_ds$cong_iso, method="hdi")
+
+beta_low_si <- median(low_ds$cong_iso)
+credint_low_si <- ci(low_ds$cong_iso, method="hdi")
+
+
+beta_up_di <- median(up_ds$inc_iso)
+credint_up_di <- ci(up_ds$inc_iso, method="hdi")
+
+beta_inv_di <- median(inv_ds$inc_iso)
+credint_inv_di <- ci(inv_ds$inc_iso, method="hdi")
+
+beta_low_di <- median(low_ds$inc_iso)
+credint_low_di <- ci(low_ds$inc_iso, method="hdi")
+
+
+
+
+
+```
+
+
+
+
+#### CM magnitudes ####
+# regression of regressions 
+```{r CM magnitudes, RofR}
+
+b1 <- etas3 %>% select(location, subject, task, congruency) %>%
+  mutate(task=case_when(task=="Inverted Face" ~ "inv",
+                         task=="Upright Face" ~ "up",
+                         task=="Contrast Detection" ~ "gra"),
+         congruency=case_when(congruency=="Congruent" ~ "cong",
+                              congruency=="Incongruent" ~ "inc",
+                              congruency=="Isolated" ~ "iso")) %>%
+  pivot_wider(names_from="congruency", values_from="location") %>%
+  mutate(C_I = cong-inc) %>% pivot_longer(3:6, names_to="congruency", values_to="val") %>%
+  pivot_wider(names_from=c("task","congruency"), values_from="val") 
+
+b2 <- b1
+
+# Upright - Iso/inc
+uiinc <- lm(up_inc~up_iso, data=b2)
+b2$uiincpredicted <- predict(uiinc)
+b2$uiincresid <- residuals(uiinc)
+
+
+# Upright - Iso/cong
+uic <- lm(up_cong~up_iso, data=b2)
+b2$uicpredicted <- predict(uic)
+b2$uicresid <- residuals(uic)
+
+# Inv - Iso/inc
+iiinc <- lm(inv_inc~inv_iso, data=b2)
+b2$iiincpredicted <- predict(iiinc)
+b2$iiincresid <- residuals(iiinc)
+
+# Inv - Iso/cong
+iic <- lm(inv_cong~inv_iso, data=b2)
+b2$iicpredicted <- predict(iic)
+b2$iicresid <- residuals(iic)
+
+# Low - Iso/inc
+giinc <- lm(gra_inc~gra_iso, data=b2)
+b2$giincpredicted <- predict(giinc)
+b2$giincresid <- residuals(giinc)
+
+# Low - Iso/cong
+gic <- lm(gra_cong~gra_iso, data=b2)
+b2$gicpredicted <- predict(gic)
+b2$gicresid <- residuals(gic)
+
+b3 <- b2 %>% select(subject, uiincresid, uicresid, iiincresid, iicresid, giincresid, gicresid)
+
+# Up - inc ~ cong
+uincc <- lm(uiincresid~uicresid, data=b3)
+b3$uinccpredicted <- predict(uincc)
+b3$uinccresid <- residuals(uincc)
+
+# Inv - inc ~ cong
+iincc <- lm(iiincresid~iicresid, data=b3)
+b3$iinccpredicted <- predict(iincc)
+b3$iinccresid <- residuals(iincc)
+
+# Low - inc ~ cong
+gincc <- lm(giincresid~gicresid, data=b3)
+b3$ginccpredicted <- predict(gincc)
+b3$ginccresid <- residuals(gincc)
+
+
+# Up - cong ~ inc 
+ucinc <- lm(uicresid~uiincresid, data=b3)
+b3$ucincpredicted <- predict(ucinc)
+b3$ucincresid <- residuals(ucinc)
+
+# Inv - cong ~ inc
+icinc <- lm(iicresid~iiincresid, data=b3)
+b3$icincpredicted <- predict(icinc)
+b3$icincresid <- residuals(icinc)
+
+# Low - cong ~ inc 
+gcinc <- lm(gicresid~giincresid, data=b3)
+b3$gcincpredicted <- predict(gcinc)
+b3$gcincresid <- residuals(gcinc)
+
+
+b4 <- b3 %>% select(subject, uinccresid, iinccresid, ginccresid, ucincresid, icincresid, gcincresid)
+
+
+```
+
+```{r correlations}
+
+b5 <- b4
+
+
+
+uplowdisosisocor <- describe_posterior(correlationBF(b4$udsresid, b4$ldsresid))
+
+uplowdisosisocor2 <- correlationBF(b4$udsresid, b4$ldsresid)
+cor.test(b4$udsresid, b4$ldsresid)
+
+rofr1 <- b4 %>% ggplot(aes(x=udsresid, y=ldsresid)) +
+  geom_point(size=1)+
+  geom_smooth(method="lm", size=1, fullrange=TRUE)+
+  ylab(expression(atop(bold("Contrast Detection"),atop("Contextual Modulation"))))+
+  xlab(expression(atop(bold("Upright Face"),atop("Contextual Modulation"))))+
+  ggthemes::scale_fill_colorblind() + 
+  ggthemes::scale_color_colorblind() +
+  theme_classic()+
+  scale_x_continuous(limits=c(-3.27,3.27))+
+  theme(axis.text.x = element_text(size=10),
+        axis.text.y = element_text(size=10),
+        axis.title=element_text(size=15),
+        axis.title.y = element_text(vjust=-4),
+        title=element_text(size=10),
+        plot.title=element_text(size=15,hjust=0.5),
+        plot.subtitle=element_text(size=10,hjust=0.5))+
+  labs(title = expression(italic(r) == .15),
+       subtitle = expression(italic(BF[10]) == .615))
+
+
+b4 %>% ggplot(aes(x=uinccresid, y=iinccresid))+
+  geom_point()+
+  geom_smooth(method="lm")
+
+b4 %>% ggplot(aes(x=uinccresid, y=ginccresid))+
+  geom_point()+
+  geom_smooth(method="lm")
+
+b4 %>% ggplot(aes(x=iinccresid, y=ginccresid))+
+  geom_point()+
+  geom_smooth(method="lm")
+
+
+
+b4 %>% ggplot(aes(x=ucincresid, y=icincresid))+
+  geom_point()+
+  geom_smooth(method="lm")
+
+b4 %>% ggplot(aes(x=ucincresid, y=gcincresid))+
+  geom_point()+
+  geom_smooth(method="lm")
+
+b4 %>% ggplot(aes(x=icincresid, y=gcincresid))+
+  geom_point()+
+  geom_smooth(method="lm")
+
+
+
+
+```
