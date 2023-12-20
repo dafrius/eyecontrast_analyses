@@ -88,7 +88,7 @@ lowdf <- singledf(lowfiles, lowdf)
 
 # eyes
 
-highfiles <- getfilenames("high")
+highfiles <- getfilenames("data_high")
 
 highdf <- c()
 
@@ -107,19 +107,26 @@ lohi_ec_pilot <- lohi_ec %>% filter(str_detect(subject,lohi_ec_target_names))
 
 #saving the data to an rda file to run in R
 
-save(lohi_ec_pilot, file="ec_pilot.rda")
+save(lohi_ec_pilot, file="ec_1sub.rda")
 
 highdf %>% ggplot(aes(x=rt))+
-  facet_wrap(~context)+
+  facet_wrap(~condition)+
+  geom_density()
+lowdf %>% ggplot(aes(x=rt))+
+  facet_wrap(~condition)+
   geom_density()
 
+lohi_ec_pilot %>% ggplot(aes(x=contrast)) +
+  geom_histogram()
+
+summdata <- lohi_ec_pilot %>% group_by(task) %>% 
+  mutate(contrast=log10(contrast)) %>%
+  group_by(condition, task) %>% summarise(normcontrast=mean(contrast),sd=sd(contrast), se=sd/sqrt(n_distinct(subject)))
 
 
-summdata <- lohi_ec_15subs %>% group_by(task) %>% 
-  mutate(contrast=log10(contrast)) #%>% 
-  group_by(congruency, task) %>% summarise(meancontrast=mean(contrast),sd=sd(contrast), se=sd/sqrt(15))
-
-summdata %>% ggplot(aes(x=task, y=meancontrast, color=congruency))+
+summdata %>% ggplot(aes(y=normcontrast, x=condition, color=condition))+
   geom_boxplot()+
-  geom_errorbar(aes(ymin=meancontrast-se, ymax=meancontrast+se))
+  geom_errorbar(aes(ymin=normcontrast-se, ymax=normcontrast+se))+
+  facet_wrap(~task)+
+  theme_classic()
   

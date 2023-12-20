@@ -4,7 +4,7 @@ library(ggplot2)
 library(brms)
 library(rstan)
 
-load("ec_pilot.rda")
+load("ec_1sub.rda")
 
 df <- lohi_ec_pilot
 
@@ -31,21 +31,18 @@ load("fit_ec.rda")
 pred_df <- expand.grid(contrast3 = seq(-3,3, l = 101),
                        task = unique(df_trns$task),
                        subject = unique(df_trns$subject),
-                       congruency = unique(df_trns$condition))
+                       condition = unique(df_trns$condition))
 
 pred_df <- pred_df %>% mutate(guess=1)
 pred_df <- bind_cols(pred_df, as_tibble(fitted(fit_ec, newdata = pred_df, 
                                                re_formula = NULL,scale="linear")))
 save(pred_df, file="preds_fit_ec.rda", compress="xz")
 
-  
-
-
 
 df_trns_avg <- df_trns %>% group_by(condition, task) %>% 
   summarise(acc=mean(acc))
 
-df_trns_avg %>% ggplot(aes(x=condition, y=acc, color=congruency))+
+df_trns_avg %>% ggplot(aes(x=condition, y=acc, color=condition))+
   geom_point()+
   geom_line(aes(group=task))+
   facet_wrap(~task)
